@@ -223,3 +223,5 @@ setInterval(function() {
     updated = false;
   }
 }, 200);
+
+// I have read the section in 'Migrate Data to Mock Database on Server'
