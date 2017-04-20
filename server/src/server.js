@@ -1,17 +1,22 @@
 // Imports the express Node module.
 var express = require('express');
+var StatusUpdateSchema = require('./schemas/statusupdate.json');
+var CommentUpdateSchema = require('./schemas/comment.json');
 // Creates an Express server.
 var app = express();
-
 var bodyParser = require('body-parser');
-app.use(bodyParser.text());
-
-// You run the server from `server`, so `../client/build` is `server/../client/build`.
-// '..' means "go up one directory", so this translates into `client/build`!
+var reverseString = require('./util').reverseString;
+var readDocument = require('./database').readDocument;
+var validate = require('express-jsonschema').validate;
+var database = require('./database');
+var writeDocument = database.writeDocument;
+var addDocument = database.addDocument;
 app.use(express.static('../client/build'));
-
-var database = require('./database.js');
-var readDocument = database.readDocument
+app.use(bodyParser.text());
+// Support receiving text in HTTP request bodies
+app.use(bodyParser.text());
+// Support receiving JSON in HTTP request bodies
+app.use(bodyParser.json());
 
 /**
  * Resolves a feed item. Internal to the server, since it's synchronous.
@@ -24,7 +29,7 @@ function getFeedItemSync(feedItemId) {
   // Assuming a StatusUpdate. If we had other types of
   // FeedItems in the DB, we would
   // need to check the type and have logic for each type.
-  feedItem.contents.author = readDocument('users', feedItem.contents.author);
+  feedItem.contents.author = readDocument('users',feedItem.contents.author);
   // Resolve comment author.
   feedItem.comments.forEach((comment) => {
     comment.author = readDocument('users', comment.author);
@@ -82,21 +87,12 @@ app.get('/user/:userid/feed', function(req, res) {
   var useridNumber = parseInt(userid, 10);
   if (fromUser === useridNumber) {
     // Send response.
-    res.send(getFeedData(userid));
+    res.send(getFeedData(userid)); //Introducing timeout. Commented and then remove comment.
   } else {
     // 401: Unauthorized request.
     res.status(401).end();
   }
 });
-
-var StatusUpdateSchema = require('./schemas/statusupdate.json');
-var validate = require('express-jsonschema').validate;
-var writeDocument = database.writeDocument;
-var addDocument = database.addDocument;
-// Support receiving text in HTTP request bodies
-app.use(bodyParser.text());
-// Support receiving JSON in HTTP request bodies
-app.use(bodyParser.json());
 
 /**
  * Adds a new status update to the database.
@@ -149,7 +145,7 @@ app.post('/feeditem',
   // Check if requester is authorized to post this status update.
   // (The requester must be the author of the update.)
   if (fromUser === body.userId) {
-    var newUpdate = postStatusUpdate(body.userId, body.location, body.contents);
+    var newUpdate = postStatusUpdate(body.userId, body.location,body.contents);
     // When POST creates a new resource, we should tell the client about it
     // in the 'Location' header and use status code 201.
     res.status(201);
@@ -161,10 +157,6 @@ app.post('/feeditem',
     res.status(401).end();
   }
 });
-
-/**
- * Translate JSON Schema Validation failures into error 400s.
- */
 
 // Reset database.
 app.post('/resetdb', function(req, res) {
@@ -245,9 +237,8 @@ app.put('/feeditem/:feeditemid/likelist/:userid', function(req, res) {
       writeDocument('feedItems', feedItem);
     }
     // Return a resolved version of the likeCounter
-    res.send(feedItem.likeCounter.map((userId) => readDocument('users', userId)));
-    }
-    else {
+    res.send(feedItem.likeCounter.map((userId) =>readDocument('users', userId)));
+  } else {
     // 401: Unauthorized.
     res.status(401).end();
   }
@@ -306,7 +297,73 @@ app.post('/search', function(req, res) {
   }
 });
 
+function postComment(feedItemId, author, contents){
+  var feedItem = readDocument('feedItems', feedItemId);
+  feedItem.comments.push({
+    "author": author,
+    "contents": contents,
+    "postDate": new Date().getTime(),
+    "likeCounter": []
+  });
+  writeDocument('feedItems', feedItem);
+  return getFeedItemSync(feedItemId);
+}
 
+//Post comments
+app.post('/feeditem/:feeditemid/commentThread/comment', validate({body: CommentUpdateSchema}), function(req, res) {
+  var body = req.body;
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  if(fromUser === body.author){
+    var newComment = postComment(req.params.feeditemid, body.author, body.contents);
+    res.status(201);
+    res.set('Location', '/feeditem/' + newComment._id);
+    res.send(newComment);
+  }else{
+    res.send(401).end();
+  }
+});
+//Like comments
+app.put('/feeditem/:feeditemid/commentThread/comment/:commentid/likeList/:userid', function(req,res){
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  var feedItemId = parseInt(req.params.feeditemid, 10);
+  var commentId = parseInt(req.params.commentid, 10);
+  var userId = parseInt(req.params.userid, 10);
+  if (fromUser === userId){
+    var feedItem = readDocument('feedItems', feedItemId);
+    var comment = feedItem.comments[commentId];
+    if(comment.likeCounter.indexOf(userId) === -1){
+      comment.likeCounter.push(userId);
+    }
+    writeDocument('feedItems', feedItem);
+    comment.author = readDocument('users', comment.author);
+    res.send(comment);
+  }else{
+    res.status(401).end();
+  }
+});
+//unlike Comments
+app.delete('/feeditem/:feeditemid/commentThread/comment/:commentid/likeList/:userid', function(req,res){
+  var fromUser = getUserIdFromToken(req.get('Authorization'));
+  var feedItemId = parseInt(req.params.feeditemid, 10);
+  var commentId = parseInt(req.params.commentid, 10);
+  var userId = parseInt(req.params.userid, 10);
+  if (fromUser === userId){
+    var feedItem = readDocument('feedItems', feedItemId);
+    var comment = feedItem.comments[commentId];
+    if(comment.likeCounter.indexOf(userId) !== -1){
+      comment.likeCounter.splice(comment.likeCounter.indexOf(userId), 1);
+      writeDocument('feedItems', feedItem);
+    }
+    comment.author = readDocument('users', comment.author);
+    res.send(comment);
+  }else{
+    res.status(401).end();
+  }
+});
+
+/**
+ * Translate JSON Schema Validation failures into error 400s.
+ */
 app.use(function(err, req, res, next) {
   if (err.name === 'JsonSchemaValidation') {
     // Set a bad request http response status
